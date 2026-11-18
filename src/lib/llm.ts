@@ -1,5 +1,6 @@
 // Yapay zekâ sağlayıcı katmanı (yalnızca sunucuda kullanılır).
-// Sıra: Gemini (GEMINI_API_KEY) → OpenAI (OPENAI_API_KEY). Biri başarısız olursa
+// Sıra: Gemini (GEMINI_API_KEY) → DeepSeek (DEEPSEEK_API_KEY) → OpenAI (OPENAI_API_KEY).
+// Biri başarısız olursa
 // tanımlı olan sonraki sağlayıcı denenir.
 // Anahtarlar hiçbir zaman loglanmaz ve tarayıcıya gönderilmez.
 
@@ -14,7 +15,7 @@ export type LlmResult =
       modelProblem?: boolean; // model bulunamadı: yedek modele geç
     };
 
-export type Provider = "gemini" | "openai";
+export type Provider = "gemini" | "deepseek" | "openai";
 
 const TIMEOUT_MS = 20_000; // OpenAI çağrısı; toplam süre 60 sn'nin altında kalmalı
 
@@ -25,6 +26,7 @@ function geminiKey(): string | undefined {
 export function getProviders(): Provider[] {
   const list: Provider[] = [];
   if (geminiKey()) list.push("gemini");
+  if (process.env.DEEPSEEK_API_KEY) list.push("deepseek");
   if (process.env.OPENAI_API_KEY) list.push("openai");
   return list;
 }
@@ -46,7 +48,12 @@ export async function generateJson(messages: ChatMessage[]): Promise<LlmResult> 
   for (const provider of providers) {
     let r: LlmResult;
     try {
-      r = provider === "gemini" ? await callGemini(messages) : await callOpenAI(messages);
+      r =
+        provider === "gemini"
+          ? await callGemini(messages)
+          : provider === "deepseek"
+            ? await callDeepSeek(messages)
+            : await callOpenAI(messages);
     } catch (err) {
       console.error("LLM çağrısı başarısız:", provider, err instanceof Error ? err.name : "bilinmeyen");
       r = { ok: false, message: "Yapay zekâ servisine ulaşılamadı, tekrar deneyin." };
@@ -197,22 +204,33 @@ async function callGeminiOnce(messages: ChatMessage[], model: string): Promise<L
   return { ok: true, text };
 }
 
-// ---------------------------------------------------------------- OpenAI
+// ------------------------------------------- OpenAI uyumlu sağlayıcılar
 
-async function callOpenAI(messages: ChatMessage[]): Promise<LlmResult> {
-  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+interface ChatCompletionsConfig {
+  label: string; // hata mesajlarında görünen ad
+  url: string;
+  apiKey: string;
+  apiKeyName: string; // Vercel'deki değişken adı
+  model: string;
+  maxTokens: number;
+}
+
+async function callChatCompletions(
+  messages: ChatMessage[],
+  cfg: ChatCompletionsConfig
+): Promise<LlmResult> {
+  const res = await fetch(cfg.url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      Authorization: `Bearer ${cfg.apiKey}`,
     },
     body: JSON.stringify({
-      model,
+      model: cfg.model,
       messages,
       response_format: { type: "json_object" },
       temperature: 0.8,
-      max_tokens: 1200,
+      max_tokens: cfg.maxTokens,
     }),
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
@@ -225,24 +243,59 @@ async function callOpenAI(messages: ChatMessage[]): Promise<LlmResult> {
     } catch {
       /* gövde okunamadı */
     }
-    console.error("OpenAI hata:", res.status, code);
+    // Yalnızca durum ve hata kodu kaydedilir; istek/anahtar loglanmaz.
+    console.error(`${cfg.label} hata:`, res.status, code);
     if (res.status === 401) {
-      return { ok: false, message: "OpenAI anahtarı geçersiz. OPENAI_API_KEY değerini kontrol edin." };
-    }
-    if (res.status === 429) {
       return {
         ok: false,
-        message:
-          code === "insufficient_quota"
-            ? "OpenAI hesabında kredi yok. Billing bölümünden kredi yükleyin."
-            : "OpenAI istek sınırına takıldı, biraz sonra tekrar deneyin.",
+        message: `${cfg.label} anahtarı geçersiz. ${cfg.apiKeyName} değerini kontrol edin.`,
       };
     }
-    return { ok: false, message: `OpenAI isteği reddetti (${res.status}). Model: ${model}.` };
+    if (res.status === 402 || (res.status === 429 && code === "insufficient_quota")) {
+      return {
+        ok: false,
+        message: `${cfg.label} hesabında bakiye/kredi yok. Hesabınıza bakiye yükleyin.`,
+      };
+    }
+    if (res.status === 429) {
+      return { ok: false, message: `${cfg.label} istek sınırına takıldı, biraz sonra tekrar deneyin.` };
+    }
+    if (res.status === 500 || res.status === 503) {
+      return { ok: false, message: `${cfg.label} şu an yoğun, biraz sonra tekrar deneyin.` };
+    }
+    return {
+      ok: false,
+      message: `${cfg.label} isteği reddetti (${res.status}). Model: ${cfg.model}.`,
+    };
   }
 
   const data = await res.json();
   const text: string = data?.choices?.[0]?.message?.content ?? "";
-  if (!text) return { ok: false, message: "Yapay zekâ boş yanıt döndürdü, tekrar deneyin." };
+  if (!text.trim()) {
+    return { ok: false, message: `${cfg.label} boş yanıt döndürdü, tekrar deneyin.` };
+  }
   return { ok: true, text };
+}
+
+function callOpenAI(messages: ChatMessage[]): Promise<LlmResult> {
+  return callChatCompletions(messages, {
+    label: "OpenAI",
+    url: "https://api.openai.com/v1/chat/completions",
+    apiKey: process.env.OPENAI_API_KEY!,
+    apiKeyName: "OPENAI_API_KEY",
+    model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+    maxTokens: 1200,
+  });
+}
+
+function callDeepSeek(messages: ChatMessage[]): Promise<LlmResult> {
+  return callChatCompletions(messages, {
+    label: "DeepSeek",
+    url: "https://api.deepseek.com/chat/completions",
+    apiKey: process.env.DEEPSEEK_API_KEY!,
+    apiKeyName: "DEEPSEEK_API_KEY",
+    model: process.env.DEEPSEEK_MODEL || "deepseek-flash",
+    // JSON yarıda kesilmesin diye geniş tutulur.
+    maxTokens: 4096,
+  });
 }
