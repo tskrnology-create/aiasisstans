@@ -67,7 +67,13 @@ function ResultCard({ row }: { row: GeneratedRow }) {
 }
 
 export default function Generator() {
-  const [prompt, setPrompt] = useState("");
+  // "Yeniden kullan" bağlantısı ?prompt=... ile gelir. Bu bileşen yalnızca
+  // oturum açıldıktan sonra (istemcide) çizildiği için window güvenle okunur.
+  const [prompt, setPrompt] = useState(() => {
+    if (typeof window === "undefined") return "";
+    const q = new URLSearchParams(window.location.search).get("prompt");
+    return q ? q.slice(0, MAX_PROMPT_LEN) : "";
+  });
   const [tone, setTone] = useState<Tone | "">("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

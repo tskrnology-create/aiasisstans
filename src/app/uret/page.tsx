@@ -1,4 +1,3 @@
-import Link from "next/link";
 import AuthGate from "@/components/AuthGate";
 import Generator from "@/components/Generator";
 
@@ -6,10 +5,7 @@ export default function GeneratePage() {
   return (
     <main className="mx-auto w-full max-w-2xl px-5 py-10">
       <header className="mb-8 space-y-2">
-        <Link href="/" className="text-sm underline underline-offset-4">
-          ← İşletme profili
-        </Link>
-        <p className="pt-2 text-xs font-medium uppercase tracking-wide text-neutral-500">
+        <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">
           Adım 2 / AI Content Generator
         </p>
         <h1 className="text-2xl font-bold">İçerik üretin</h1>
