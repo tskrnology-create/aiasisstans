@@ -1,5 +1,6 @@
 // Yapay zekâ sağlayıcı katmanı (yalnızca sunucuda kullanılır).
-// Öncelik: GEMINI_API_KEY varsa Gemini, yoksa OPENAI_API_KEY varsa OpenAI.
+// Sıra: Gemini (GEMINI_API_KEY) → OpenAI (OPENAI_API_KEY). Biri başarısız olursa
+// tanımlı olan sonraki sağlayıcı denenir.
 // Anahtarlar hiçbir zaman loglanmaz ve tarayıcıya gönderilmez.
 
 import type { ChatMessage } from "./brand-prompt";
@@ -15,31 +16,45 @@ export type LlmResult =
 
 export type Provider = "gemini" | "openai";
 
-const TIMEOUT_MS = 45_000;
+const TIMEOUT_MS = 20_000; // OpenAI çağrısı; toplam süre 60 sn'nin altında kalmalı
 
 function geminiKey(): string | undefined {
   return process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || undefined;
 }
 
+export function getProviders(): Provider[] {
+  const list: Provider[] = [];
+  if (geminiKey()) list.push("gemini");
+  if (process.env.OPENAI_API_KEY) list.push("openai");
+  return list;
+}
+
 export function getProvider(): Provider | null {
-  if (geminiKey()) return "gemini";
-  if (process.env.OPENAI_API_KEY) return "openai";
-  return null;
+  return getProviders()[0] ?? null;
 }
 
 export async function generateJson(messages: ChatMessage[]): Promise<LlmResult> {
-  const provider = getProvider();
-  try {
-    if (provider === "gemini") return await callGemini(messages);
-    if (provider === "openai") return await callOpenAI(messages);
+  const providers = getProviders();
+  if (providers.length === 0) {
     return {
       ok: false,
       message: "Yapay zekâ servisi henüz yapılandırılmadı (GEMINI_API_KEY).",
     };
-  } catch (err) {
-    console.error("LLM çağrısı başarısız:", err instanceof Error ? err.name : "bilinmeyen");
-    return { ok: false, message: "Yapay zekâ servisine ulaşılamadı, tekrar deneyin." };
   }
+
+  const failures: string[] = [];
+  for (const provider of providers) {
+    let r: LlmResult;
+    try {
+      r = provider === "gemini" ? await callGemini(messages) : await callOpenAI(messages);
+    } catch (err) {
+      console.error("LLM çağrısı başarısız:", provider, err instanceof Error ? err.name : "bilinmeyen");
+      r = { ok: false, message: "Yapay zekâ servisine ulaşılamadı, tekrar deneyin." };
+    }
+    if (r.ok) return r;
+    failures.push(r.message);
+  }
+  return { ok: false, message: failures.join(" | ") };
 }
 
 // ---------------------------------------------------------------- Gemini
@@ -56,8 +71,8 @@ async function callGemini(messages: ChatMessage[]): Promise<LlmResult> {
 
   for (let i = 0; i < attempts.length; i++) {
     if (i > 0) {
-      if (Date.now() - started > 35_000) break; // toplam süre bütçesi
-      await sleep(i === 1 ? 1500 : 500);
+      if (Date.now() - started > 22_000) break; // toplam süre bütçesi
+      await sleep(i === 1 ? 1000 : 500);
     }
     const model = attempts[i];
     if (i === 1 && last.ok === false && last.modelProblem) continue; // aynı bozuk modeli tekrar deneme
@@ -107,7 +122,7 @@ async function callGeminiOnce(messages: ChatMessage[], model: string): Promise<L
           maxOutputTokens: 8192,
         },
       }),
-      signal: AbortSignal.timeout(20_000),
+      signal: AbortSignal.timeout(18_000),
     }
   );
 
