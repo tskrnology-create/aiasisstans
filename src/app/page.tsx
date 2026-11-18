@@ -1,3 +1,4 @@
+import Link from "next/link";
 import AuthGate from "@/components/AuthGate";
 import ProfileForm from "@/components/ProfileForm";
 
@@ -16,6 +17,12 @@ export default function Home() {
       </header>
       <AuthGate>
         <ProfileForm />
+        <p className="mt-8 border-t border-neutral-200 pt-6 text-sm dark:border-neutral-800">
+          Profilinizi kaydettiniz mi?{" "}
+          <Link href="/uret" className="font-medium underline underline-offset-4">
+            İçerik üretmeye geçin →
+          </Link>
+        </p>
       </AuthGate>
     </main>
   );
