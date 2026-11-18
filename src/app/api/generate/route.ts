@@ -15,6 +15,9 @@ import {
 import { isTone } from "@/lib/tones";
 import { generateJson, getProvider } from "@/lib/llm";
 
+// Yeniden denemeler dahil üretim 60 sn'ye kadar sürebilir.
+export const maxDuration = 60;
+
 const MAX_PROMPT_LEN = 500;
 const HOURLY_LIMIT = 30;
 

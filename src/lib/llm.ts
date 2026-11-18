@@ -6,7 +6,12 @@ import type { ChatMessage } from "./brand-prompt";
 
 export type LlmResult =
   | { ok: true; text: string }
-  | { ok: false; message: string };
+  | {
+      ok: false;
+      message: string;
+      retryable?: boolean; // geçici hata (yoğunluk, zaman aşımı): aynı modeli tekrar dene
+      modelProblem?: boolean; // model bulunamadı: yedek modele geç
+    };
 
 export type Provider = "gemini" | "openai";
 
@@ -39,8 +44,42 @@ export async function generateJson(messages: ChatMessage[]): Promise<LlmResult> 
 
 // ---------------------------------------------------------------- Gemini
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Geçici hatalarda (503 vb.) aynı modeli bir kez daha, sonra yedek modeli dener.
 async function callGemini(messages: ChatMessage[]): Promise<LlmResult> {
-  const model = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+  const primary = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+  const fallback = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.6-flash";
+  const attempts = fallback !== primary ? [primary, primary, fallback] : [primary, primary];
+  const started = Date.now();
+  let last: LlmResult = { ok: false, message: "Yapay zekâ servisine ulaşılamadı, tekrar deneyin." };
+
+  for (let i = 0; i < attempts.length; i++) {
+    if (i > 0) {
+      if (Date.now() - started > 35_000) break; // toplam süre bütçesi
+      await sleep(i === 1 ? 1500 : 500);
+    }
+    const model = attempts[i];
+    if (i === 1 && last.ok === false && last.modelProblem) continue; // aynı bozuk modeli tekrar deneme
+    let r: LlmResult;
+    try {
+      r = await callGeminiOnce(messages, model);
+    } catch (err) {
+      console.error("Gemini bağlantı hatası:", model, err instanceof Error ? err.name : "bilinmeyen");
+      r = { ok: false, retryable: true, message: "Yapay zekâ servisine ulaşılamadı, tekrar deneyin." };
+    }
+    if (r.ok) return r;
+    if (!last.ok && last.modelProblem && !r.modelProblem && !r.retryable) {
+      // yedek modelden gelen kalıcı hata: ilk hatayı koru
+    } else {
+      last = r;
+    }
+    if (!r.retryable && !r.modelProblem) return r; // anahtar/izin hatası: tekrar denemenin anlamı yok
+  }
+  return last;
+}
+
+async function callGeminiOnce(messages: ChatMessage[], model: string): Promise<LlmResult> {
   const system = messages
     .filter((m) => m.role === "system")
     .map((m) => m.content)
@@ -68,7 +107,7 @@ async function callGemini(messages: ChatMessage[]): Promise<LlmResult> {
           maxOutputTokens: 8192,
         },
       }),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: AbortSignal.timeout(20_000),
     }
   );
 
@@ -99,7 +138,15 @@ async function callGemini(messages: ChatMessage[]): Promise<LlmResult> {
     if (res.status === 404) {
       return {
         ok: false,
+        modelProblem: true,
         message: `Gemini modeli bulunamadı (${model}). Vercel'e geçerli bir GEMINI_MODEL değeri ekleyin.`,
+      };
+    }
+    if (res.status === 500 || res.status === 503 || res.status === 504) {
+      return {
+        ok: false,
+        retryable: true,
+        message: "Gemini şu an yoğun. Birkaç saniye sonra tekrar deneyin.",
       };
     }
     if (res.status === 429) {
