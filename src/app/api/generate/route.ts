@@ -1,6 +1,6 @@
 // İçerik üretim uç noktası.
 // Güvenlik ilkeleri:
-//  - OpenAI anahtarı yalnızca sunucuda (OPENAI_API_KEY), tarayıcıya gitmez.
+//  - Yapay zekâ anahtarı (GEMINI_API_KEY veya OPENAI_API_KEY) yalnızca sunucuda durur.
 //  - Kullanıcının oturum belirteci ile Supabase'e bağlanılır; böylece RLS geçerli
 //    kalır ve kullanıcı yalnızca kendi işletmesinin profilini okuyabilir.
 //  - Saatlik üretim limiti vardır (maliyet kontrolü).
@@ -13,6 +13,7 @@ import {
   type BusinessProfile,
 } from "@/lib/brand-prompt";
 import { isTone } from "@/lib/tones";
+import { generateJson, getProvider } from "@/lib/llm";
 
 const MAX_PROMPT_LEN = 500;
 const HOURLY_LIMIT = 30;
@@ -24,11 +25,10 @@ function json(body: Record<string, unknown>, status = 200) {
 export async function POST(request: Request) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-  const openaiKey = process.env.OPENAI_API_KEY;
   if (!url || !anonKey) return json({ error: "Sunucu ayarları eksik." }, 500);
-  if (!openaiKey) {
+  if (!getProvider()) {
     return json(
-      { error: "Yapay zekâ servisi henüz yapılandırılmadı (OPENAI_API_KEY)." },
+      { error: "Yapay zekâ servisi henüz yapılandırılmadı (GEMINI_API_KEY)." },
       503
     );
   }
@@ -101,65 +101,11 @@ export async function POST(request: Request) {
     );
   }
 
-  // 5) OpenAI çağrısı
+  // 5) Yapay zekâ çağrısı
   const messages = buildGenerateMessages(profile, { userPrompt: prompt, tone });
-  let raw: string;
-  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
-  try {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${openaiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        response_format: { type: "json_object" },
-        temperature: 0.8,
-        max_tokens: 1200,
-      }),
-      signal: AbortSignal.timeout(45_000),
-    });
-    if (!res.ok) {
-      // Yalnızca durum ve hata kodu kaydedilir; istek/anahtar loglanmaz.
-      let code = "";
-      try {
-        const e = await res.json();
-        code = e?.error?.code ?? e?.error?.type ?? "";
-      } catch {
-        /* gövde okunamadı */
-      }
-      console.error("OpenAI hata:", res.status, code);
-      if (res.status === 401) {
-        return json(
-          { error: "OpenAI anahtarı geçersiz. Vercel'deki OPENAI_API_KEY değerini kontrol edin." },
-          502
-        );
-      }
-      if (res.status === 429) {
-        if (code === "insufficient_quota") {
-          return json(
-            { error: "OpenAI hesabında kredi yok. platform.openai.com'da Billing bölümünden kredi yükleyin." },
-            502
-          );
-        }
-        return json({ error: "OpenAI istek sınırına takıldı, biraz sonra tekrar deneyin." }, 502);
-      }
-      if (res.status === 400 || res.status === 403 || res.status === 404) {
-        return json(
-          { error: `OpenAI isteği reddetti (${res.status}${code ? ", " + code : ""}). Model: ${model}. OPENAI_MODEL ayarını kontrol edin.` },
-          502
-        );
-      }
-      return json({ error: `Yapay zekâ servisi hata verdi (${res.status}), tekrar deneyin.` }, 502);
-    }
-    const data = await res.json();
-    raw = data?.choices?.[0]?.message?.content ?? "";
-  } catch (err) {
-    console.error("OpenAI çağrısı başarısız:", err instanceof Error ? err.name : "bilinmeyen");
-    return json({ error: "Yapay zekâ servisine ulaşılamadı, tekrar deneyin." }, 502);
-  }
+  const result = await generateJson(messages);
+  if (!result.ok) return json({ error: result.message }, 502);
+  const raw = result.text;
 
   let generated;
   try {
