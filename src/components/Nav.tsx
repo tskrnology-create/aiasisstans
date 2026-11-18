@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 const ITEMS = [
   { href: "/", label: "Profil" },
   { href: "/uret", label: "İçerik üret" },
+  { href: "/takvim", label: "Takvim" },
   { href: "/kutuphane", label: "Kütüphane" },
 ];
 
