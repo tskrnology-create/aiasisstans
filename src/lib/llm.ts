@@ -17,7 +17,8 @@ export type LlmResult =
 
 export type Provider = "gemini" | "deepseek" | "openai";
 
-const TIMEOUT_MS = 20_000; // OpenAI çağrısı; toplam süre 60 sn'nin altında kalmalı
+const TIMEOUT_MS = 25_000; // tek çağrı üst sınırı
+const TOTAL_BUDGET_MS = 55_000; // tüm sağlayıcılar dahil; Vercel maxDuration (60 sn) altında
 
 function geminiKey(): string | undefined {
   return process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || undefined;
@@ -35,6 +36,9 @@ export function getProvider(): Provider | null {
   return getProviders()[0] ?? null;
 }
 
+const LABELS: Record<Provider, string> = { gemini: "Gemini", deepseek: "DeepSeek", openai: "OpenAI" };
+const errName = (e: unknown) => (e instanceof Error ? e.name : "bilinmeyen");
+
 export async function generateJson(messages: ChatMessage[]): Promise<LlmResult> {
   const providers = getProviders();
   if (providers.length === 0) {
@@ -45,18 +49,23 @@ export async function generateJson(messages: ChatMessage[]): Promise<LlmResult> 
   }
 
   const failures: string[] = [];
+  const deadline = Date.now() + TOTAL_BUDGET_MS;
   for (const provider of providers) {
+    if (failures.length > 0 && deadline - Date.now() < 3000) {
+      failures.push("Süre doldu.");
+      break;
+    }
     let r: LlmResult;
     try {
       r =
         provider === "gemini"
-          ? await callGemini(messages)
+          ? await callGemini(messages, deadline)
           : provider === "deepseek"
-            ? await callDeepSeek(messages)
-            : await callOpenAI(messages);
+            ? await callDeepSeek(messages, deadline)
+            : await callOpenAI(messages, deadline);
     } catch (err) {
       console.error("LLM çağrısı başarısız:", provider, err instanceof Error ? err.name : "bilinmeyen");
-      r = { ok: false, message: "Yapay zekâ servisine ulaşılamadı, tekrar deneyin." };
+      r = { ok: false, message: `${LABELS[provider]}'ye ulaşılamadı (${errName(err)}).` };
     }
     if (r.ok) return r;
     failures.push(r.message);
@@ -69,26 +78,25 @@ export async function generateJson(messages: ChatMessage[]): Promise<LlmResult> 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Geçici hatalarda (503 vb.) aynı modeli bir kez daha, sonra yedek modeli dener.
-async function callGemini(messages: ChatMessage[]): Promise<LlmResult> {
+async function callGemini(messages: ChatMessage[], deadline: number): Promise<LlmResult> {
   const primary = process.env.GEMINI_MODEL || "gemini-3.8-flash";
   const fallback = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.6-flash";
   const attempts = fallback !== primary ? [primary, primary, fallback] : [primary, primary];
-  const started = Date.now();
-  let last: LlmResult = { ok: false, message: "Yapay zekâ servisine ulaşılamadı, tekrar deneyin." };
+  let last: LlmResult = { ok: false, message: "Gemini'ye ulaşılamadı." };
 
   for (let i = 0; i < attempts.length; i++) {
     if (i > 0) {
-      if (Date.now() - started > 22_000) break; // toplam süre bütçesi
+      if (deadline - Date.now() < 6000) break; // süre bütçesi
       await sleep(i === 1 ? 1000 : 500);
     }
     const model = attempts[i];
     if (i === 1 && last.ok === false && last.modelProblem) continue; // aynı bozuk modeli tekrar deneme
     let r: LlmResult;
     try {
-      r = await callGeminiOnce(messages, model);
+      r = await callGeminiOnce(messages, model, deadline, true);
     } catch (err) {
-      console.error("Gemini bağlantı hatası:", model, err instanceof Error ? err.name : "bilinmeyen");
-      r = { ok: false, retryable: true, message: "Yapay zekâ servisine ulaşılamadı, tekrar deneyin." };
+      console.error("Gemini bağlantı hatası:", model, errName(err));
+      r = { ok: false, retryable: true, message: `Gemini'ye ulaşılamadı (${errName(err)}, ${model}).` };
     }
     if (r.ok) return r;
     if (!last.ok && last.modelProblem && !r.modelProblem && !r.retryable) {
@@ -101,7 +109,12 @@ async function callGemini(messages: ChatMessage[]): Promise<LlmResult> {
   return last;
 }
 
-async function callGeminiOnce(messages: ChatMessage[], model: string): Promise<LlmResult> {
+async function callGeminiOnce(
+  messages: ChatMessage[],
+  model: string,
+  deadline: number,
+  useThinking: boolean
+): Promise<LlmResult> {
   const system = messages
     .filter((m) => m.role === "system")
     .map((m) => m.content)
@@ -127,9 +140,11 @@ async function callGeminiOnce(messages: ChatMessage[], model: string): Promise<L
           temperature: 0.8,
           // Düşünme jetonları da bu sınıra sayıldığı için yüksek tutulur.
           maxOutputTokens: 8192,
+          // Varsayılan düşünme seviyesi (medium) yavaş; kısa içerik için low yeterli.
+          ...(useThinking ? { thinkingConfig: { thinkingLevel: "low" } } : {}),
         },
       }),
-      signal: AbortSignal.timeout(18_000),
+      signal: AbortSignal.timeout(Math.min(TIMEOUT_MS, Math.max(1000, deadline - Date.now()))),
     }
   );
 
@@ -144,6 +159,11 @@ async function callGeminiOnce(messages: ChatMessage[], model: string): Promise<L
       /* gövde okunamadı */
     }
     console.error("Gemini hata:", res.status, status, reason);
+
+    // Model thinkingLevel'ı kabul etmezse ayarsız yeniden dene.
+    if (res.status === 400 && useThinking && reason !== "API_KEY_INVALID") {
+      return callGeminiOnce(messages, model, deadline, false);
+    }
 
     if (reason === "API_KEY_INVALID" || res.status === 401) {
       return {
@@ -217,7 +237,8 @@ interface ChatCompletionsConfig {
 
 async function callChatCompletions(
   messages: ChatMessage[],
-  cfg: ChatCompletionsConfig
+  cfg: ChatCompletionsConfig,
+  deadline: number
 ): Promise<LlmResult> {
   const res = await fetch(cfg.url, {
     method: "POST",
@@ -232,7 +253,7 @@ async function callChatCompletions(
       temperature: 0.8,
       max_tokens: cfg.maxTokens,
     }),
-    signal: AbortSignal.timeout(TIMEOUT_MS),
+    signal: AbortSignal.timeout(Math.min(TIMEOUT_MS, Math.max(1000, deadline - Date.now()))),
   });
 
   if (!res.ok) {
@@ -277,7 +298,7 @@ async function callChatCompletions(
   return { ok: true, text };
 }
 
-function callOpenAI(messages: ChatMessage[]): Promise<LlmResult> {
+function callOpenAI(messages: ChatMessage[], deadline: number): Promise<LlmResult> {
   return callChatCompletions(messages, {
     label: "OpenAI",
     url: "https://api.openai.com/v1/chat/completions",
@@ -285,10 +306,10 @@ function callOpenAI(messages: ChatMessage[]): Promise<LlmResult> {
     apiKeyName: "OPENAI_API_KEY",
     model: process.env.OPENAI_MODEL || "gpt-4o-mini",
     maxTokens: 1200,
-  });
+  }, deadline);
 }
 
-function callDeepSeek(messages: ChatMessage[]): Promise<LlmResult> {
+function callDeepSeek(messages: ChatMessage[], deadline: number): Promise<LlmResult> {
   return callChatCompletions(messages, {
     label: "DeepSeek",
     url: "https://api.deepseek.com/chat/completions",
@@ -297,5 +318,5 @@ function callDeepSeek(messages: ChatMessage[]): Promise<LlmResult> {
     model: process.env.DEEPSEEK_MODEL || "deepseek-flash",
     // JSON yarıda kesilmesin diye geniş tutulur.
     maxTokens: 4096,
-  });
+  }, deadline);
 }
