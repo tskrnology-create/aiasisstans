@@ -1,3 +1,4 @@
+import AuthGate from "@/components/AuthGate";
 import ProfileForm from "@/components/ProfileForm";
 
 export default function Home() {
@@ -13,7 +14,9 @@ export default function Home() {
           istediğiniz zaman değiştirebilirsiniz.
         </p>
       </header>
-      <ProfileForm />
+      <AuthGate>
+        <ProfileForm />
+      </AuthGate>
     </main>
   );
 }

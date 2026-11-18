@@ -46,12 +46,20 @@ export default function ProfileForm() {
   const [logoError, setLogoError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [savedAt, setSavedAt] = useState<Date | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    businessStore.get().then((stored) => {
-      if (stored) setForm({ ...EMPTY_BUSINESS, ...stored });
-      setLoaded(true);
-    });
+    businessStore
+      .get()
+      .then((stored) => {
+        if (stored) setForm({ ...EMPTY_BUSINESS, ...stored });
+      })
+      .catch((err: Error) =>
+        setLoadError("Profil yüklenemedi: " + err.message)
+      )
+      .finally(() => setLoaded(true));
   }, []);
 
   function update<K extends keyof StoredBusiness>(key: K, value: StoredBusiness[K]) {
@@ -81,16 +89,27 @@ export default function ProfileForm() {
     const found = validateBusiness(form);
     setErrors(found);
     if (Object.keys(found).length > 0) return;
-    await businessStore.save({
-      ...form,
-      name: form.name.trim(),
-      industry: form.industry.trim(),
-      social_accounts: form.social_accounts.map((a) => ({
-        ...a,
-        handle: a.handle.trim(),
-      })),
-    });
-    setSavedAt(new Date());
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const { id } = await businessStore.save({
+        ...form,
+        name: form.name.trim(),
+        industry: form.industry.trim(),
+        social_accounts: form.social_accounts.map((a) => ({
+          ...a,
+          handle: a.handle.trim(),
+        })),
+      });
+      setForm((f) => ({ ...f, id }));
+      setSavedAt(new Date());
+    } catch (err) {
+      setSaveError(
+        "Kaydedilemedi: " + (err instanceof Error ? err.message : "bilinmeyen hata")
+      );
+    } finally {
+      setSaving(false);
+    }
   }
 
   const colors = form.brand_colors ?? [];
@@ -101,6 +120,11 @@ export default function ProfileForm() {
 
   return (
     <form onSubmit={onSubmit} className="space-y-8" noValidate>
+      {loadError && (
+        <p className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800">
+          {loadError}
+        </p>
+      )}
       <section className="space-y-5">
         <h2 className="text-lg font-semibold">Temel bilgiler</h2>
         <Field label="İşletme adı *" error={errors.name}>
@@ -325,15 +349,17 @@ export default function ProfileForm() {
       <div className="flex items-center gap-4 border-t border-neutral-200 pt-6 dark:border-neutral-800">
         <button
           type="submit"
-          className="rounded-lg bg-neutral-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-neutral-700 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
+          disabled={saving}
+          className="rounded-lg bg-neutral-900 px-5 py-2.5 text-sm font-medium text-white hover:bg-neutral-700 disabled:opacity-60 dark:bg-white dark:text-neutral-900 dark:hover:bg-neutral-200"
         >
-          Kaydet
+          {saving ? "Kaydediliyor…" : "Kaydet"}
         </button>
         {savedAt && (
           <span className="text-sm text-green-700">
             Kaydedildi ({savedAt.toLocaleTimeString("tr-TR")})
           </span>
         )}
+        {saveError && <span className="text-sm text-red-600">{saveError}</span>}
       </div>
     </form>
   );

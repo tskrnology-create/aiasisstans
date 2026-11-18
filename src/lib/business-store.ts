@@ -1,8 +1,9 @@
-// Depolama katmanı. Şimdilik tarayıcının localStorage'ını kullanır.
-// Supabase'e geçerken yalnızca bu dosyadaki `businessStore` nesnesi
-// değiştirilecek; form ve diğer ekranlar aynı arayüzü kullanmaya devam eder.
+// Depolama katmanı: işletme profili Supabase'de (businesses + social_accounts).
+// Erişim güvenliğini schema.sql içindeki RLS politikaları sağlar; her
+// kullanıcı yalnızca kendi işletmesini okuyup yazabilir.
 
 import type { BusinessProfile } from "./brand-prompt";
+import { getSupabase } from "./supabase";
 
 export type SocialPlatform =
   | "instagram"
@@ -19,28 +20,107 @@ export interface SocialAccount {
 }
 
 export interface StoredBusiness extends BusinessProfile {
+  id?: string;
+  // v1'de logo küçük bir data URL olarak businesses.logo_url sütununda tutulur.
+  // Storage bucket'ına geçiş sonraki aşamada.
   logo_data_url: string | null;
   social_accounts: SocialAccount[];
 }
 
 export interface BusinessStore {
   get(): Promise<StoredBusiness | null>;
-  save(business: StoredBusiness): Promise<void>;
+  save(business: StoredBusiness): Promise<{ id: string }>;
 }
-
-const STORAGE_KEY = "aba.business.v1";
 
 export const businessStore: BusinessStore = {
   async get() {
-    try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      return raw ? (JSON.parse(raw) as StoredBusiness) : null;
-    } catch {
-      return null;
-    }
+    const supabase = getSupabase();
+    const { data: row, error } = await supabase
+      .from("businesses")
+      .select("*")
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!row) return null;
+
+    const { data: accounts, error: accError } = await supabase
+      .from("social_accounts")
+      .select("platform, handle")
+      .eq("business_id", row.id)
+      .order("created_at", { ascending: true });
+    if (accError) throw new Error(accError.message);
+
+    return {
+      id: row.id,
+      name: row.name,
+      industry: row.industry,
+      products: row.products ?? "",
+      target_audience: row.target_audience ?? "",
+      brand_voice: row.brand_voice ?? "",
+      brand_colors: row.brand_colors ?? [],
+      content_language: row.content_language,
+      logo_data_url: row.logo_url ?? null,
+      social_accounts: (accounts ?? []) as SocialAccount[],
+    };
   },
+
   async save(business) {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(business));
+    const supabase = getSupabase();
+    const { data: userData, error: userError } = await supabase.auth.getUser();
+    if (userError || !userData.user) throw new Error("Oturum bulunamadı, tekrar giriş yapın.");
+
+    const fields = {
+      name: business.name,
+      industry: business.industry,
+      products: business.products || null,
+      target_audience: business.target_audience || null,
+      brand_voice: business.brand_voice || null,
+      brand_colors: business.brand_colors ?? [],
+      content_language: business.content_language,
+      logo_url: business.logo_data_url,
+    };
+
+    let businessId = business.id;
+    if (businessId) {
+      const { error } = await supabase
+        .from("businesses")
+        .update(fields)
+        .eq("id", businessId);
+      if (error) throw new Error(error.message);
+    } else {
+      const { data, error } = await supabase
+        .from("businesses")
+        .insert({ ...fields, owner_id: userData.user.id })
+        .select("id")
+        .single();
+      if (error) throw new Error(error.message);
+      businessId = data.id as string;
+    }
+
+    // Sosyal hesaplar: önce sil, sonra güncel listeyi yaz.
+    const { error: delError } = await supabase
+      .from("social_accounts")
+      .delete()
+      .eq("business_id", businessId);
+    if (delError) throw new Error(delError.message);
+
+    const unique = new Map<string, SocialAccount>();
+    for (const a of business.social_accounts) {
+      unique.set(`${a.platform}:${a.handle}`, a);
+    }
+    if (unique.size > 0) {
+      const { error: insError } = await supabase.from("social_accounts").insert(
+        [...unique.values()].map((a) => ({
+          business_id: businessId,
+          platform: a.platform,
+          handle: a.handle,
+        }))
+      );
+      if (insError) throw new Error(insError.message);
+    }
+
+    return { id: businessId };
   },
 };
 
