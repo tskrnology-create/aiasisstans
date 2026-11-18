@@ -42,3 +42,29 @@ KOBİ'ler ve ajanslar için marka kimliğini bilen yapay zekâ içerik asistanı
 ## Sonraki adım
 
 Next.js projesini oluşturmak, Supabase'e `schema.sql`'i yüklemek ve Business Profile formunu yazmak.
+
+## Güncel durum
+
+| Modül | Sayfa | Durum |
+|---|---|---|
+| Business Profile | `/` | Hazır (Supabase + e-posta/şifre girişi) |
+| AI Content Generator | `/uret` | Hazır (Gemini → DeepSeek → OpenAI sırasıyla yedekli) |
+| AI Visual Creator | `/gorsel` | Hazır: 5 şablon, 3 format, PNG indirme, yapay zekâ/yüklenen arka plan |
+| Content Calendar | `/takvim` | Hazır: ay/hafta görünümü, hatırlatma (sayfa içi), elle paylaşım |
+| Content Library | `/kutuphane` | Hazır: arama, düzenleme, onay, indirme, yeniden kullanma |
+
+### Ortam değişkenleri (Vercel)
+
+`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `GEMINI_API_KEY`
+(isteğe bağlı: `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `GEMINI_MODEL`, `GEMINI_IMAGE_MODEL`).
+Gizli anahtarlar `NEXT_PUBLIC_` ile başlamaz.
+
+### Veritabanı
+
+1. `schema.sql` (ilk kurulum)
+2. `schema_v2_image_usage.sql` (görsel üretim limiti için; `/api/image` bunu gerektirir)
+
+### Bilinçli olarak ertelenenler
+
+Otomatik paylaşım, video üretimi, analiz, rakip analizi, reklam yönetimi, ekip yönetimi, CRM.
+Görseller şimdilik kaydedilmez (indirilir); Storage'a kaydetme sonraki aşama.
