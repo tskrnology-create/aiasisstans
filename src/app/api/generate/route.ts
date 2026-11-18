@@ -104,6 +104,7 @@ export async function POST(request: Request) {
   // 5) OpenAI çağrısı
   const messages = buildGenerateMessages(profile, { userPrompt: prompt, tone });
   let raw: string;
+  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
   try {
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -112,7 +113,7 @@ export async function POST(request: Request) {
         Authorization: `Bearer ${openaiKey}`,
       },
       body: JSON.stringify({
-        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+        model,
         messages,
         response_format: { type: "json_object" },
         temperature: 0.8,
@@ -121,8 +122,37 @@ export async function POST(request: Request) {
       signal: AbortSignal.timeout(45_000),
     });
     if (!res.ok) {
-      console.error("OpenAI hata durumu:", res.status);
-      return json({ error: "Yapay zekâ servisi şu an yanıt vermedi, tekrar deneyin." }, 502);
+      // Yalnızca durum ve hata kodu kaydedilir; istek/anahtar loglanmaz.
+      let code = "";
+      try {
+        const e = await res.json();
+        code = e?.error?.code ?? e?.error?.type ?? "";
+      } catch {
+        /* gövde okunamadı */
+      }
+      console.error("OpenAI hata:", res.status, code);
+      if (res.status === 401) {
+        return json(
+          { error: "OpenAI anahtarı geçersiz. Vercel'deki OPENAI_API_KEY değerini kontrol edin." },
+          502
+        );
+      }
+      if (res.status === 429) {
+        if (code === "insufficient_quota") {
+          return json(
+            { error: "OpenAI hesabında kredi yok. platform.openai.com'da Billing bölümünden kredi yükleyin." },
+            502
+          );
+        }
+        return json({ error: "OpenAI istek sınırına takıldı, biraz sonra tekrar deneyin." }, 502);
+      }
+      if (res.status === 400 || res.status === 403 || res.status === 404) {
+        return json(
+          { error: `OpenAI isteği reddetti (${res.status}${code ? ", " + code : ""}). Model: ${model}. OPENAI_MODEL ayarını kontrol edin.` },
+          502
+        );
+      }
+      return json({ error: `Yapay zekâ servisi hata verdi (${res.status}), tekrar deneyin.` }, 502);
     }
     const data = await res.json();
     raw = data?.choices?.[0]?.message?.content ?? "";
